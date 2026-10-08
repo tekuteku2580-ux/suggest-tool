@@ -14,7 +14,10 @@
   main { max-width:1100px; margin:0 auto; padding:24px 16px 60px; }
   h1 { font-size:22px; margin:0 0 16px; }
   .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
-  input[type=text] { flex:1 1 260px; font-size:17px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); }
+  textarea { flex:1 1 260px; font-size:16px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font-family:inherit; resize:vertical; }
+  .hint { flex-basis:100%; font-size:12px; color:var(--sub); margin-top:-4px; }
+  h2 { font-size:17px; margin:22px 0 10px; padding-bottom:4px; border-bottom:2px solid var(--accent); }
+  h2 small { font-size:13px; color:var(--sub); font-weight:normal; margin-left:6px; }
   button { font-size:15px; padding:10px 18px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
   button.sub { background:transparent; color:var(--accent); border:1px solid var(--accent); padding:6px 12px; font-size:13px; }
   button:disabled { opacity:.5; cursor:wait; }
@@ -39,7 +42,7 @@
 <main>
   <h1>サジェスト一括取得</h1>
   <form class="bar" id="f">
-    <input type="text" id="q" placeholder="調べたい単語（例：競馬）" autofocus>
+    <textarea id="q" rows="3" placeholder="調べたい単語（1行に1つ。例：&#10;競馬&#10;カフェ）" autofocus></textarea>
     <label>どこの：
       <select id="source"><option value="google">Google</option><option value="youtube">YouTube</option></select>
     </label>
@@ -47,6 +50,7 @@
     <label><input type="checkbox" value="alpha" checked> a〜z</label>
     <label><input type="checkbox" value="num"> 0〜9</label>
     <button id="go">取得</button>
+    <div class="hint">単語は改行・「、」・「,」で区切って何個でも入れられる。Ctrl+Enter でも取得できる</div>
   </form>
   <div class="status" id="status"></div>
   <div id="out"></div>
@@ -58,11 +62,13 @@ const esc = s => s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'
 const searchUrl = s => ($("source").value === "youtube"
   ? "https://www.youtube.com/results?search_query=" : "https://www.google.com/search?q=") + encodeURIComponent(s);
 
-function uniq() {
+function uniq(groups = data) {
   const seen = new Set(), list = [];
-  for (const g of data) for (const s of g.items) if (!seen.has(s)) { seen.add(s); list.push(s); }
+  for (const g of groups) for (const s of g.items) if (!seen.has(s)) { seen.add(s); list.push(s); }
   return list;
 }
+const parseWords = () => [...new Set($("q").value.split(/[\n、,，]+/).map(w => w.trim()).filter(Boolean))];
+const link = s => `<a href="${searchUrl(s)}" target="_blank">${esc(s)}</a>`;
 
 function render() {
   const list = uniq();
@@ -74,20 +80,25 @@ function render() {
   const tabs = `<div class="tabs">
     <button data-v="group" class="${view==="group"?"on":""}">文字ごと</button>
     <button data-v="flat" class="${view==="flat"?"on":""}">まとめて一覧</button></div>`;
-  const body = view === "group"
-    ? `<div class="grid">${data.map(g => `<div class="card ${g.items.length?"":"empty"}">
-        <h3>${esc(g.query)}</h3><ol>${g.items.map(s => `<li><a href="${searchUrl(s)}" target="_blank">${esc(s)}</a></li>`).join("") || "（なし）"}</ol></div>`).join("")}</div>`
-    : `<div class="flat">${list.map(s => `<div><a href="${searchUrl(s)}" target="_blank">${esc(s)}</a></div>`).join("")}</div>`;
+  const words = [...new Set(data.map(g => g.word))];
+  const body = words.map(w => {
+    const groups = data.filter(g => g.word === w), wl = uniq(groups);
+    const head = words.length > 1 ? `<h2>${esc(w)}<small>${wl.length} 件</small></h2>` : "";
+    return head + (view === "group"
+      ? `<div class="grid">${groups.map(g => `<div class="card ${g.items.length?"":"empty"}">
+          <h3>${esc(g.query)}</h3><ol>${g.items.map(s => `<li>${link(s)}</li>`).join("") || "（なし）"}</ol></div>`).join("")}</div>`
+      : `<div class="flat">${wl.map(s => `<div>${link(s)}</div>`).join("")}</div>`);
+  }).join("");
   $("out").innerHTML = tabs + body;
   $("out").querySelectorAll(".tabs button").forEach(b => b.onclick = () => { view = b.dataset.v; render(); });
   $("copy").onclick = async () => { await navigator.clipboard.writeText(list.join("\n")); $("copy").textContent = "コピーした！"; };
   $("csv").onclick = () => {
-    const rows = [["検索語", "サジェスト"]];
-    for (const g of data) for (const s of g.items) rows.push([g.query, s]);
+    const rows = [["単語", "検索語", "サジェスト"]];
+    for (const g of data) for (const s of g.items) rows.push([g.word, g.query, s]);
     const csv = "﻿" + rows.map(r => r.map(c => `"${c.replace(/"/g,'""')}"`).join(",")).join("\r\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
-    a.download = `suggest_${$("q").value.trim()}.csv`;
+    a.download = `suggest_${words[0]}${words.length > 1 ? "ほか" + (words.length - 1) + "件" : ""}.csv`;
     a.click();
   };
 }
@@ -112,9 +123,10 @@ function fetchSuggest(source, q) {
   });
 }
 
-async function collect(word, source, sets) {
+async function collect(words, source, sets) {
   const suffixes = ["", ...(sets.includes("kana") ? KANA : []), ...(sets.includes("alpha") ? ALPHA : []), ...(sets.includes("num") ? NUM : [])];
-  const queries = suffixes.map(s => s ? `${word} ${s}` : word);
+  const jobs = words.flatMap(word => suffixes.map(s => ({word, suffix: s, query: s ? `${word} ${s}` : word})));
+  const queries = jobs.map(j => j.query);
   const results = new Array(queries.length);
   let next = 0, finished = 0;
   async function worker() {
@@ -125,21 +137,22 @@ async function collect(word, source, sets) {
     }
   }
   await Promise.all(Array.from({length: 6}, worker));
-  return suffixes.map((s, i) => ({suffix: s, query: queries[i], items: results[i]}));
+  return jobs.map((j, i) => ({...j, items: results[i]}));
 }
 
 $("f").onsubmit = async e => {
   e.preventDefault();
-  const q = $("q").value.trim();
-  if (!q) return;
+  const words = parseWords();
+  if (!words.length) return;
   const sets = [...document.querySelectorAll("input[type=checkbox]:checked")].map(c => c.value);
   $("go").disabled = true;
   $("status").textContent = "取得中…";
-  data = await collect(q, $("source").value, sets);
+  data = await collect(words, $("source").value, sets);
   $("go").disabled = false;
   if (data.some(g => g.items.length)) render();
   else $("status").textContent = "取れなかった（通信を確認して、少し待ってからもう一回）";
 };
+$("q").onkeydown = e => { if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); $("f").requestSubmit(); } };
 </script>
 </body>
 </html>
