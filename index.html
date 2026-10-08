@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>サジェスト一括取得</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2433; --sub:#6b7280; --line:#e5e7eb; --accent:#2563eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161b; --card:#1e2128; --text:#e6e8ee; --sub:#9aa1ad; --line:#2e323b; --accent:#6ea0ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:"Segoe UI","Yu Gothic UI",sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { font-size:22px; margin:0 0 16px; }
+  .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  input[type=text] { flex:1 1 260px; font-size:17px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); }
+  button { font-size:15px; padding:10px 18px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.sub { background:transparent; color:var(--accent); border:1px solid var(--accent); padding:6px 12px; font-size:13px; }
+  button:disabled { opacity:.5; cursor:wait; }
+  label { font-size:14px; color:var(--sub); white-space:nowrap; }
+  select { font-size:14px; padding:6px; border-radius:6px; background:var(--bg); color:var(--text); border:1px solid var(--line); }
+  .status { margin:14px 2px; color:var(--sub); font-size:14px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .tabs { display:flex; gap:6px; margin-bottom:12px; }
+  .tabs button { background:transparent; color:var(--sub); border:1px solid var(--line); padding:6px 14px; font-size:14px; }
+  .tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  .card h3 { margin:0 0 6px; font-size:14px; color:var(--accent); }
+  .card ol { margin:0; padding-left:20px; font-size:14px; line-height:1.6; }
+  .card.empty { opacity:.45; }
+  .flat { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 16px; columns:3 220px; font-size:14px; line-height:1.8; }
+  .flat div { break-inside:avoid; }
+  a { color:inherit; text-decoration:none; }
+  a:hover { color:var(--accent); text-decoration:underline; }
+</style>
+</head>
+<body>
+<main>
+  <h1>サジェスト一括取得</h1>
+  <form class="bar" id="f">
+    <input type="text" id="q" placeholder="調べたい単語（例：競馬）" autofocus>
+    <label>どこの：
+      <select id="source"><option value="google">Google</option><option value="youtube">YouTube</option></select>
+    </label>
+    <label><input type="checkbox" value="kana" checked> あ〜ん</label>
+    <label><input type="checkbox" value="alpha" checked> a〜z</label>
+    <label><input type="checkbox" value="num"> 0〜9</label>
+    <button id="go">取得</button>
+  </form>
+  <div class="status" id="status"></div>
+  <div id="out"></div>
+</main>
+<script>
+let data = [], view = "group";
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const searchUrl = s => ($("source").value === "youtube"
+  ? "https://www.youtube.com/results?search_query=" : "https://www.google.com/search?q=") + encodeURIComponent(s);
+
+function uniq() {
+  const seen = new Set(), list = [];
+  for (const g of data) for (const s of g.items) if (!seen.has(s)) { seen.add(s); list.push(s); }
+  return list;
+}
+
+function render() {
+  const list = uniq();
+  $("status").innerHTML = data.length ? `
+    <span>${list.length} 件（重なりを除く）</span>
+    <button class="sub" id="copy">全部コピー</button>
+    <button class="sub" id="csv">CSV保存</button>` : "";
+  if (!data.length) { $("out").innerHTML = ""; return; }
+  const tabs = `<div class="tabs">
+    <button data-v="group" class="${view==="group"?"on":""}">文字ごと</button>
+    <button data-v="flat" class="${view==="flat"?"on":""}">まとめて一覧</button></div>`;
+  const body = view === "group"
+    ? `<div class="grid">${data.map(g => `<div class="card ${g.items.length?"":"empty"}">
+        <h3>${esc(g.query)}</h3><ol>${g.items.map(s => `<li><a href="${searchUrl(s)}" target="_blank">${esc(s)}</a></li>`).join("") || "（なし）"}</ol></div>`).join("")}</div>`
+    : `<div class="flat">${list.map(s => `<div><a href="${searchUrl(s)}" target="_blank">${esc(s)}</a></div>`).join("")}</div>`;
+  $("out").innerHTML = tabs + body;
+  $("out").querySelectorAll(".tabs button").forEach(b => b.onclick = () => { view = b.dataset.v; render(); });
+  $("copy").onclick = async () => { await navigator.clipboard.writeText(list.join("\n")); $("copy").textContent = "コピーした！"; };
+  $("csv").onclick = () => {
+    const rows = [["検索語", "サジェスト"]];
+    for (const g of data) for (const s of g.items) rows.push([g.query, s]);
+    const csv = "﻿" + rows.map(r => r.map(c => `"${c.replace(/"/g,'""')}"`).join(",")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
+    a.download = `suggest_${$("q").value.trim()}.csv`;
+    a.click();
+  };
+}
+
+const KANA = [..."あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん"];
+const ALPHA = [..."abcdefghijklmnopqrstuvwxyz"];
+const NUM = [..."0123456789"];
+let seq = 0;
+
+// Google のサジェストを JSONP で取る（サーバーなしで動く）
+function fetchSuggest(source, q) {
+  return new Promise(resolve => {
+    const cb = "__sg" + (seq++);
+    const s = document.createElement("script");
+    const done = items => { delete window[cb]; s.remove(); clearTimeout(t); resolve(items); };
+    const t = setTimeout(() => done([]), 10000);
+    window[cb] = d => done(d[1] || []);
+    s.onerror = () => done([]);
+    s.src = "https://suggestqueries.google.com/complete/search?client=firefox&hl=ja&ie=utf-8&oe=utf-8"
+      + (source === "youtube" ? "&ds=yt" : "") + "&q=" + encodeURIComponent(q) + "&callback=" + cb;
+    document.body.appendChild(s);
+  });
+}
+
+async function collect(word, source, sets) {
+  const suffixes = ["", ...(sets.includes("kana") ? KANA : []), ...(sets.includes("alpha") ? ALPHA : []), ...(sets.includes("num") ? NUM : [])];
+  const queries = suffixes.map(s => s ? `${word} ${s}` : word);
+  const results = new Array(queries.length);
+  let next = 0, finished = 0;
+  async function worker() {
+    while (next < queries.length) {
+      const i = next++;
+      results[i] = await fetchSuggest(source, queries[i]);
+      $("status").textContent = `取得中… ${++finished} / ${queries.length}`;
+    }
+  }
+  await Promise.all(Array.from({length: 6}, worker));
+  return suffixes.map((s, i) => ({suffix: s, query: queries[i], items: results[i]}));
+}
+
+$("f").onsubmit = async e => {
+  e.preventDefault();
+  const q = $("q").value.trim();
+  if (!q) return;
+  const sets = [...document.querySelectorAll("input[type=checkbox]:checked")].map(c => c.value);
+  $("go").disabled = true;
+  $("status").textContent = "取得中…";
+  data = await collect(q, $("source").value, sets);
+  $("go").disabled = false;
+  if (data.some(g => g.items.length)) render();
+  else $("status").textContent = "取れなかった（通信を確認して、少し待ってからもう一回）";
+};
+</script>
+</body>
+</html>
