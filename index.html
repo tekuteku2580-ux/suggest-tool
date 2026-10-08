@@ -50,7 +50,7 @@
     <label><input type="checkbox" value="alpha" checked> a〜z</label>
     <label><input type="checkbox" value="num"> 0〜9</label>
     <button id="go">取得</button>
-    <div class="hint">単語は改行・「、」・「,」で区切って何個でも入れられる。Ctrl+Enter でも取得できる</div>
+    <div class="hint">単語は改行・「、」・「,」で区切って何個でも入れられる。Ctrl+Enter でも取得できる。Google に負担をかけないよう、ゆっくり取りに行く（1回取った結果は24時間使い回す）</div>
   </form>
   <div class="status" id="status"></div>
   <div id="out"></div>
@@ -106,51 +106,116 @@ function render() {
 const KANA = [..."あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん"];
 const ALPHA = [..."abcdefghijklmnopqrstuvwxyz"];
 const NUM = [..."0123456789"];
-let seq = 0;
 
-// Google のサジェストを JSONP で取る（サーバーなしで動く）
+// Google に怒られないための決まり
+const RULE = {
+  workers: 2,              // 同時に取りに行く数
+  waitMin: 500,            // 1回取るごとに待つ時間（ミリ秒・ランダム）
+  waitMax: 1000,
+  errorsToPause: 3,        // 続けて失敗したら休む
+  pauseSec: [30, 60, 120], // 休む時間（だんだん長く）。使いきったらやめる
+  cacheHours: 24,          // 一度取った結果はこの時間、取りに行かずに使い回す
+  bigRun: 300,             // これより多く取りに行くときは確認する
+};
+let seq = 0, running = false, aborted = false;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// 取った結果をブラウザに覚えておく（同じ単語をもう一回調べても Google に行かない）
+const cacheKey = (source, q) => `sg:${source}:${q}`;
+function cacheGet(source, q) {
+  try {
+    const c = JSON.parse(localStorage.getItem(cacheKey(source, q)));
+    if (c && Date.now() - c.t < RULE.cacheHours * 3600e3) return c.items;
+  } catch {}
+  return null;
+}
+function cacheSet(source, q, items) {
+  try { localStorage.setItem(cacheKey(source, q), JSON.stringify({t: Date.now(), items})); } catch {}
+}
+
+// Google のサジェストを JSONP で取る（サーバーなしで動く）。失敗したら null
 function fetchSuggest(source, q) {
   return new Promise(resolve => {
     const cb = "__sg" + (seq++);
     const s = document.createElement("script");
-    const done = items => { delete window[cb]; s.remove(); clearTimeout(t); resolve(items); };
-    const t = setTimeout(() => done([]), 10000);
-    window[cb] = d => done(d[1] || []);
-    s.onerror = () => done([]);
+    const done = items => { window[cb] = () => {}; s.remove(); clearTimeout(t); resolve(items); };
+    const t = setTimeout(() => done(null), 10000);
+    window[cb] = d => done(Array.isArray(d) && Array.isArray(d[1]) ? d[1] : null);
+    s.onerror = () => done(null);
     s.src = "https://suggestqueries.google.com/complete/search?client=firefox&hl=ja&ie=utf-8&oe=utf-8"
       + (source === "youtube" ? "&ds=yt" : "") + "&q=" + encodeURIComponent(q) + "&callback=" + cb;
     document.body.appendChild(s);
   });
 }
 
-async function collect(words, source, sets) {
+function makeJobs(words, sets) {
   const suffixes = ["", ...(sets.includes("kana") ? KANA : []), ...(sets.includes("alpha") ? ALPHA : []), ...(sets.includes("num") ? NUM : [])];
-  const jobs = words.flatMap(word => suffixes.map(s => ({word, suffix: s, query: s ? `${word} ${s}` : word})));
-  const queries = jobs.map(j => j.query);
-  const results = new Array(queries.length);
-  let next = 0, finished = 0;
+  return words.flatMap(word => suffixes.map(s => ({word, suffix: s, query: s ? `${word} ${s}` : word})));
+}
+
+async function collect(jobs, source) {
+  const results = jobs.map(j => cacheGet(source, j.query));
+  const queue = results.map((r, i) => r === null ? i : -1).filter(i => i >= 0);
+  let finished = jobs.length - queue.length, errors = 0, pauses = 0, gaveUp = false, pausing = null;
+  const show = () => $("status").textContent = `取得中… ${finished} / ${jobs.length}（止めるときは「止める」）`;
+  show();
+
   async function worker() {
-    while (next < queries.length) {
-      const i = next++;
-      results[i] = await fetchSuggest(source, queries[i]);
-      $("status").textContent = `取得中… ${++finished} / ${queries.length}`;
+    while (queue.length && !aborted && !gaveUp) {
+      if (pausing) { await pausing; continue; }
+      const i = queue.shift();
+      const items = await fetchSuggest(source, jobs[i].query);
+      if (items === null) {
+        queue.push(i); // あとでやり直す
+        if (++errors >= RULE.errorsToPause && !pausing) {
+          if (pauses >= RULE.pauseSec.length) { gaveUp = true; break; }
+          const sec = RULE.pauseSec[pauses++];
+          pausing = (async () => {
+            for (let s = sec; s > 0 && !aborted; s--) {
+              $("status").textContent = `Google が混んでるみたい。${s} 秒休んでから続ける…`;
+              await sleep(1000);
+            }
+            errors = 0; pausing = null; show();
+          })();
+        }
+      } else {
+        errors = 0;
+        results[i] = items;
+        cacheSet(source, jobs[i].query, items);
+        finished++; show();
+      }
+      await sleep(RULE.waitMin + Math.random() * (RULE.waitMax - RULE.waitMin));
     }
   }
-  await Promise.all(Array.from({length: 6}, worker));
-  return jobs.map((j, i) => ({...j, items: results[i]}));
+  await Promise.all(Array.from({length: RULE.workers}, worker));
+  return {groups: jobs.map((j, i) => ({...j, items: results[i] || []})), gaveUp, done: finished, total: jobs.length};
 }
 
 $("f").onsubmit = async e => {
   e.preventDefault();
+  if (running) { aborted = true; return; }
   const words = parseWords();
   if (!words.length) return;
   const sets = [...document.querySelectorAll("input[type=checkbox]:checked")].map(c => c.value);
-  $("go").disabled = true;
-  $("status").textContent = "取得中…";
-  data = await collect(words, $("source").value, sets);
-  $("go").disabled = false;
+  const source = $("source").value;
+  const jobs = makeJobs(words, sets);
+  const fresh = jobs.filter(j => cacheGet(source, j.query) === null).length;
+  if (fresh > RULE.bigRun) {
+    const min = Math.ceil(fresh * (RULE.waitMin + RULE.waitMax) / 2 / RULE.workers / 60000);
+    if (!confirm(`Google に ${fresh} 回取りに行きます（だいたい ${min} 分）。\n多いと止められることがあるので、単語を減らすのがおすすめ。\nこのまま続けますか？`)) return;
+  }
+  running = true; aborted = false;
+  $("go").textContent = "止める";
+  const r = await collect(jobs, source);
+  running = false;
+  $("go").textContent = "取得";
+  data = r.groups;
   if (data.some(g => g.items.length)) render();
-  else $("status").textContent = "取れなかった（通信を確認して、少し待ってからもう一回）";
+  else $("status").textContent = "";
+  const note = r.gaveUp ? `Google に止められたみたい。${r.done} / ${r.total} だけ取れた。しばらく（1時間くらい）あけてからもう一回やると、続きから取れる。`
+    : aborted ? `途中で止めた（${r.done} / ${r.total}）。もう一回押すと続きから取れる。` : "";
+  if (note) $("status").insertAdjacentHTML("afterbegin", `<span style="color:#d97706;flex-basis:100%">${esc(note)}</span>`);
+  if (!data.some(g => g.items.length) && !note) $("status").textContent = "取れなかった（通信を確認して、少し待ってからもう一回）";
 };
 $("q").onkeydown = e => { if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); $("f").requestSubmit(); } };
 </script>
